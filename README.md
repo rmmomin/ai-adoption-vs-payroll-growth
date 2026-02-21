@@ -8,6 +8,7 @@ This folder contains a self-contained Python script to recreate the chart:
 It exports both:
 - a **dots** version (fixed point size)
 - a **bubbles** version (bubble size scaled to sector employment level)
+- a **3x3 collage** of alternative y-metrics against AI adoption
 
 ## Outputs
 
@@ -16,6 +17,7 @@ Running the script writes to `--outdir`:
 - `ai_adoption_vs_growth_rel_trend_pp_data.csv`
 - `ai_adoption_vs_growth_rel_trend_pp_dots.png`
 - `ai_adoption_vs_growth_rel_trend_pp_bubbles.png`
+- `ai_adoption_vs_growth_metric_collage.png`
 
 ## Requirements
 

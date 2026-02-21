@@ -22,6 +22,7 @@ What this script does
    - CSV of sector-level plot inputs
    - Dot scatter PNG
    - Bubble scatter PNG (bubble size ~ employment level)
+   - 3x3 metric collage PNG
 
 Usage (recommended)
 -------------------
@@ -472,6 +473,92 @@ def compute_growth_components(ts: pd.Series, end_date: pd.Timestamp, start_year_
     )
 
 
+def _month_delta(start: pd.Timestamp, end: pd.Timestamp) -> int:
+    """Return whole-month difference between two month-start timestamps."""
+    return int((end.year - start.year) * 12 + (end.month - start.month))
+
+
+def _safe_pct(numer: float, denom: float) -> float:
+    """Return 100 * numer/denom with NaN safety."""
+    if not np.isfinite(numer) or not np.isfinite(denom) or abs(float(denom)) < 1e-12:
+        return float("nan")
+    return float((numer / denom) * 100.0)
+
+
+def annualized_pct_change(start_value: float, end_value: float, months: int) -> float:
+    """Annualized simple percent growth from start to end."""
+    if months <= 0 or not np.isfinite(start_value) or not np.isfinite(end_value) or start_value <= 0 or end_value <= 0:
+        return float("nan")
+    return float(((end_value / start_value) ** (12.0 / months) - 1.0) * 100.0)
+
+
+def annualized_log_change(start_value: float, end_value: float, months: int) -> float:
+    """Annualized continuously compounded growth from start to end."""
+    if months <= 0 or not np.isfinite(start_value) or not np.isfinite(end_value) or start_value <= 0 or end_value <= 0:
+        return float("nan")
+    return float((math.log(end_value / start_value) * 12.0 / months) * 100.0)
+
+
+def monthly_level_trend_slope(values: pd.Series) -> float:
+    """Monthly slope of employment levels from OLS on a time index."""
+    v = values.dropna().astype(float)
+    if len(v) < 6:
+        return float("nan")
+    x = np.arange(len(v), dtype=float)
+    slope = np.polyfit(x, v.to_numpy(), 1)[0]
+    return float(slope)
+
+
+def compute_additional_sector_metrics(
+    ts: pd.Series,
+    end_date: pd.Timestamp,
+    total_avg_2022_emp: float,
+    start_year_pre: int = 2017,
+    start_year_post: int = 2024,
+) -> Dict[str, float]:
+    """
+    Compute additional sector metrics used in the 3x3 collage.
+    """
+    ts = ts.sort_index().astype(float)
+
+    start_2023 = pd.Timestamp(2023, 1, 1)
+    start_post = pd.Timestamp(start_year_post, 1, 1)
+    start_pre = pd.Timestamp(start_year_pre, 1, 1)
+    end_pre = pd.Timestamp(start_year_post - 1, 12, 1)
+
+    end_value = float(ts.get(end_date, np.nan))
+    value_2023_01 = float(ts.get(start_2023, np.nan))
+    value_post_start = float(ts.get(start_post, np.nan))
+
+    avg_2019_emp = float(ts[(ts.index >= pd.Timestamp(2019, 1, 1)) & (ts.index <= pd.Timestamp(2019, 12, 1))].mean())
+    avg_2022_emp = float(ts[(ts.index >= pd.Timestamp(2022, 1, 1)) & (ts.index <= pd.Timestamp(2022, 12, 1))].mean())
+
+    change_2023_to_t = end_value - value_2023_01
+
+    months_2023_to_t = _month_delta(start_2023, end_date)
+    months_post_to_t = _month_delta(start_post, end_date)
+
+    monthly_diff = ts.diff()
+    last_3_months = pd.date_range(end=end_date, periods=3, freq="MS")
+    avg_monthly_change_last3 = float(monthly_diff.reindex(last_3_months).mean())
+
+    pre_window = ts[(ts.index >= start_pre) & (ts.index <= end_pre)]
+    trend_monthly_change = monthly_level_trend_slope(pre_window)
+
+    return {
+        "emp_change_2023_to_t_pct_of_avg2019_emp": _safe_pct(change_2023_to_t, avg_2019_emp),
+        "emp_change_2023_to_t_pct_of_avg2022_emp": _safe_pct(change_2023_to_t, avg_2022_emp),
+        "emp_pct_change_since_2023_01": _safe_pct(change_2023_to_t, value_2023_01),
+        "annualized_emp_growth_since_post_pct": annualized_pct_change(value_post_start, end_value, months_post_to_t),
+        "annualized_log_emp_growth_2023_to_t_pct": annualized_log_change(value_2023_01, end_value, months_2023_to_t),
+        "avg_monthly_change_last3_minus_trend_pct_of_avg2022_emp": _safe_pct(
+            avg_monthly_change_last3 - trend_monthly_change, avg_2022_emp
+        ),
+        "emp_change_2023_to_t_pct_of_total_avg2022_emp": _safe_pct(change_2023_to_t, total_avg_2022_emp),
+        "avg_monthly_change_last3_pct_of_avg2022_emp": _safe_pct(avg_monthly_change_last3, avg_2022_emp),
+    }
+
+
 # -----------------------------
 # Plotting helpers
 # -----------------------------
@@ -619,6 +706,120 @@ def plot_scatter(
     plt.close(fig)
 
 
+def plot_metric_collage(
+    df: pd.DataFrame,
+    outpath: Path,
+    start_year_pre: int = 2017,
+    start_year_post: int = 2024,
+) -> None:
+    """
+    Build a 3x3 collage of alternative Y metrics vs AI adoption.
+    """
+    df = df.dropna(subset=["ai_adoption_current_pct"]).copy()
+    if df.empty:
+        raise ValueError("No data available to plot collage.")
+
+    end_month = pd.to_datetime(df["end_date"].iloc[0]).strftime("%Y-%m")
+    x_label = f"AI adoption rate (Ramp, {end_month}, percent)"
+    source_txt = "Source: BLS (CES), Ramp; author's calculations."
+
+    panel_specs = [
+        (
+            "ann_growth_rel_to_trend_pp",
+            f"Growth since {start_year_post} minus {start_year_pre}-23 trend (pp, annualized)",
+            f"Growth since {start_year_post} minus {start_year_pre}-23 trend (pp, annualized)",
+        ),
+        (
+            "emp_change_2023_to_t_pct_of_avg2019_emp",
+            "Emp change 2023-01->T (% of avg 2019 emp)",
+            "Emp change 2023-01->T (% of avg 2019 emp)",
+        ),
+        (
+            "emp_change_2023_to_t_pct_of_avg2022_emp",
+            "Emp change 2023-01->T (% of avg 2022 emp)",
+            "Emp change 2023-01->T (% of avg 2022 emp)",
+        ),
+        (
+            "emp_pct_change_since_2023_01",
+            "Emp % change since 2023-01",
+            "Emp % change since 2023-01",
+        ),
+        (
+            "annualized_emp_growth_since_post_pct",
+            f"Annualized emp growth since {start_year_post}-01 (%)",
+            f"Annualized emp growth since {start_year_post}-01 (%)",
+        ),
+        (
+            "annualized_log_emp_growth_2023_to_t_pct",
+            "Annualized log emp growth 2023-01->T (%)",
+            "Annualized log emp growth 2023-01->T (%)",
+        ),
+        (
+            "avg_monthly_change_last3_minus_trend_pct_of_avg2022_emp",
+            "Avg monthly change last 3m minus trend (% of avg 2022 emp)",
+            "Avg monthly change last 3m minus trend (% of avg 2022 emp)",
+        ),
+        (
+            "emp_change_2023_to_t_pct_of_total_avg2022_emp",
+            "Emp change 2023-01->T (% of total avg 2022 emp)",
+            "Emp change 2023-01->T (% of total avg 2022 emp)",
+        ),
+        (
+            "avg_monthly_change_last3_pct_of_avg2022_emp",
+            "Avg monthly change last 3m (% of avg 2022 emp)",
+            "Avg monthly change last 3m (% of avg 2022 emp)",
+        ),
+    ]
+
+    fig, axes = plt.subplots(3, 3, figsize=(24, 14), facecolor="#d9d9d9")
+    for ax, (y_col, title, y_label) in zip(axes.flatten(), panel_specs):
+        panel_df = df.dropna(subset=[y_col]).copy()
+        if panel_df.empty:
+            ax.axis("off")
+            continue
+
+        x = panel_df["ai_adoption_current_pct"].to_numpy(float)
+        y = panel_df[y_col].to_numpy(float)
+        m, b, r2 = fit_line(x, y)
+
+        ax.set_facecolor("#d9d9d9")
+        ax.scatter(x, y, s=35, color="#1f77b4", alpha=0.9, edgecolors="none")
+
+        x_min, x_max = float(np.nanmin(x)), float(np.nanmax(x))
+        y_min, y_max = float(np.nanmin(y)), float(np.nanmax(y))
+        x_pad = (x_max - x_min) * 0.06 if x_max > x_min else 1.0
+        y_pad = (y_max - y_min) * 0.10 if y_max > y_min else 1.0
+        ax.set_xlim(x_min - x_pad, x_max + x_pad)
+        ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+        xs = np.linspace(x_min, x_max, 150)
+        ax.plot(xs, m * xs + b, linestyle="--", linewidth=2.0, color="#1f77b4")
+
+        if y_min <= 0 <= y_max:
+            ax.axhline(0, color="gray", linewidth=0.8)
+
+        ax.set_title(title, fontsize=15, fontweight="bold", pad=8)
+        ax.set_xlabel(x_label, fontsize=11)
+        ax.set_ylabel(y_label, fontsize=11)
+        ax.tick_params(labelsize=10)
+
+        reg_txt = f"OLS slope = {m:.4f}   R² = {r2:.3f}"
+        ax.text(0.5, 0.97, reg_txt, transform=ax.transAxes, ha="center", va="top", fontsize=11)
+
+        for _, row in panel_df.iterrows():
+            xx = float(row["ai_adoption_current_pct"])
+            yy = float(row[y_col])
+            lab = str(row["label"])
+            ax.annotate(lab, (xx, yy), xytext=(2, 2), textcoords="offset points", fontsize=6.2)
+
+        ax.text(0.0, -0.20, source_txt, transform=ax.transAxes, ha="left", va="top", fontsize=7)
+
+    fig.tight_layout(h_pad=1.6, w_pad=1.0)
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outpath, dpi=200)
+    plt.close(fig)
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -669,11 +870,28 @@ def main() -> None:
     current = ramp_long[ramp_long["date"] == end_date].set_index("sector_key")["ai_share"]
 
     # 5) Build sector metrics from BLS
-    rows = []
+    ts_by_sector: Dict[str, pd.Series] = {}
+    avg_2022_by_sector: Dict[str, float] = {}
     for sector_key, sid in SECTOR_MAP.items():
         ts = bls_df[bls_df["series_id"] == sid].set_index("date")["value"].sort_index()
+        ts_by_sector[sector_key] = ts
+        avg_2022_by_sector[sector_key] = float(
+            ts[(ts.index >= pd.Timestamp(2022, 1, 1)) & (ts.index <= pd.Timestamp(2022, 12, 1))].mean()
+        )
+    total_avg_2022_emp = float(np.nansum(list(avg_2022_by_sector.values())))
+
+    rows = []
+    for sector_key, sid in SECTOR_MAP.items():
+        ts = ts_by_sector[sector_key]
         comp = compute_growth_components(
             ts, end_date=end_date, start_year_pre=args.start_year_pre, start_year_post=args.start_year_post
+        )
+        extra = compute_additional_sector_metrics(
+            ts,
+            end_date=end_date,
+            total_avg_2022_emp=total_avg_2022_emp,
+            start_year_pre=args.start_year_pre,
+            start_year_post=args.start_year_post,
         )
         rows.append(
             {
@@ -686,6 +904,7 @@ def main() -> None:
                 "ann_growth_trend_pre_pct": comp.pretrend_growth_ann_pct,
                 "ann_growth_rel_to_trend_pp": comp.rel_pp,
                 "end_date": end_date.strftime("%Y-%m-%d"),
+                **extra,
             }
         )
 
@@ -713,6 +932,14 @@ def main() -> None:
         start_year_post=args.start_year_post,
     )
     print("[Output] Wrote bubbles PNG")
+
+    plot_metric_collage(
+        df_plot,
+        args.outdir / "ai_adoption_vs_growth_metric_collage.png",
+        start_year_pre=args.start_year_pre,
+        start_year_post=args.start_year_post,
+    )
+    print("[Output] Wrote collage PNG")
 
     print("[Done]")
 
