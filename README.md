@@ -1,4 +1,4 @@
-# Replication kit: AI adoption vs employment growth relative to trend (BLS CES + Ramp AI Index)
+# Replication kit: AI adoption vs employment growth (BLS CES + Ramp AI Index)
 
 This folder contains a self-contained Python script to recreate the chart:
 
