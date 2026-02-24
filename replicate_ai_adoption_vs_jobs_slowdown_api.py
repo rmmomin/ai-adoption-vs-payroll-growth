@@ -837,6 +837,12 @@ def main() -> None:
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     # 1) Ramp data (AI adoption)
+    if args.ramp_csv is None:
+        default_local_ramp = Path("data/ramp-data-wQR5S.csv")
+        if default_local_ramp.exists():
+            args.ramp_csv = default_local_ramp
+            print(f"[Ramp] Using local default CSV: {args.ramp_csv}")
+
     ramp_cache = args.outdir / "cache_ramp_ai_index.csv"
     ramp_long = load_ramp_ai_index(ramp_csv=args.ramp_csv, cache_path=ramp_cache if args.ramp_csv is None else None)
 
